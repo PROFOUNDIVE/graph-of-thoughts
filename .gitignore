@@ -30,3 +30,8 @@ env/
 
 # Config File
 **/config.json
+
+# local dev artifacts
+logs/
+diff.log
+quickstart.py
