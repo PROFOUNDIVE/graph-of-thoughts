@@ -102,11 +102,11 @@ Input: {input}
     gameof24_next_move_prompt_jsonl = """<Instruction>
 You are proposing next moves for the 24 Game search.
 
-State consists of items with unique ids. A move selects exactly two different item ids and an operator in {+,-,*,/}.
+State consists of items with unique ids. A move selects exactly two different item ids and an operator in {{+,-,*,/}}.
 You must output exactly {num_branches} candidate moves.
 Each candidate must be on its own line and must be a single JSON object with this schema:
 
-{"pick":[id1,id2], "op":"+"}
+{{"pick":[id1,id2], "op":"+"}}
 
 Rules:
 - id1 and id2 must be two different ids present in the current items.
@@ -158,7 +158,7 @@ Output:
         """
 
         state = kwargs.get("state") or kwargs
-        items_json = state["item_json"]
+        items_json = state["items_json"]
 
         if current is None or current == "":
             input = original
@@ -168,7 +168,7 @@ Output:
             return self.gameof24_prompt.format(input=input)
         elif method.startswith("cot"):
             return self.gameof24_prompt_cot.format(input=input)
-        elif method.startswith("got"):
+        elif method.startswith("tot") or method.startswith("got"):
             return self.gameof24_next_move_prompt_jsonl.format(
                 num_branches=num_branches,
                 items_json=items_json
@@ -329,15 +329,15 @@ class Gameof24Parser(parser.Parser):
             - items: List[{"id","value","expr"}]
             - next_id: int
             - depth: int
-            - item_json: str (json dump for prompter)
+            - items_json: str (json dump for prompter)
             """
             if "items" in base_state and isinstance(base_state["items"], list) and len(base_state["items"]) > 0:
-                # Ensure item_json exists
-                if "item_json" not in base_state:
+                # Ensure items_json exists
+                if "items_json" not in base_state:
                     try:
-                        base_state["item_json"] = json.dumps(base_state["items"])
+                        base_state["items_json"] = json.dumps(base_state["items"])
                     except Exception:
-                        base_state["item_json"] = str(base_state["items"])
+                        base_state["items_json"] = str(base_state["items"])
                 if "next_id" not in base_state:
                     try:
                         base_state["next_id"] = max([int(it["id"]) for it in base_state["items"]]) + 1
@@ -354,9 +354,9 @@ class Gameof24Parser(parser.Parser):
             base_state["next_id"] = len(items)
             base_state["depth"] = base_state.get("depth", 0) or 0
             try:
-                base_state["item_json"] = json.dumps(items)
+                base_state["items_json"] = json.dumps(items)
             except Exception:
-                base_state["item_json"] = str(items)
+                base_state["items_json"] = str(items)
             return base_state
 
         def _find_item(items: List[Dict], item_id: int) -> Union[Dict, None]:
@@ -455,9 +455,9 @@ class Gameof24Parser(parser.Parser):
                 new_state["current"] = new_expr  # keep a human-readable trace
 
                 try:
-                    new_state["item_json"] = json.dumps(next_items)
+                    new_state["items_json"] = json.dumps(next_items)
                 except Exception:
-                    new_state["item_json"] = str(next_items)
+                    new_state["items_json"] = str(next_items)
 
                 new_states.append(new_state)
                 parsed_any = True
@@ -514,6 +514,31 @@ class Gameof24Parser(parser.Parser):
         """
         pass
 
+def _beam_search_graph(
+    num_branches: int,
+    beam_width: int,
+    max_depth: int = 3,
+) -> operations.GraphOfOperations:
+    """
+    Game24 baseline search graph:
+    repeat max_depth times: Generate(B) -> Score(game24_score) -> KeepBestN(K)
+    then GroundTruth(test_game24)
+    """
+    operations_graph = operations.GraphOfOperations()
+
+    prev_keep = None
+    for _ in range(max_depth):
+        operations_graph.append_operation(operations.Generate(1, num_branches))
+        operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+        keep = operations.KeepBestN(beam_width, False)
+        if prev_keep is not None:
+            keep.add_predecessor(prev_keep)
+        operations_graph.append_operation(keep)
+        prev_keep = keep
+    
+    operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
+
+    return operations_graph 
 
 def io() -> operations.GraphOfOperations:
     """
@@ -525,8 +550,8 @@ def io() -> operations.GraphOfOperations:
     operations_graph = operations.GraphOfOperations()
 
     operations_graph.append_operation(operations.Generate(1, 1))
-    operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-    operations_graph.append_operation(operations.GroundTruth(utils.test_sorting))
+    operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+    operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
 
     return operations_graph
 
@@ -541,8 +566,8 @@ def cot() -> operations.GraphOfOperations:
     operations_graph = operations.GraphOfOperations()
 
     operations_graph.append_operation(operations.Generate(1, 1))
-    operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-    operations_graph.append_operation(operations.GroundTruth(utils.test_sorting))
+    operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+    operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
 
     return operations_graph
 
@@ -555,25 +580,9 @@ def tot() -> operations.GraphOfOperations:
     :return: Graph of Operations
     :rtype: GraphOfOperations
     """
-    operations_graph = operations.GraphOfOperations()
 
-    operations_graph.append_operation(operations.Generate(1, 20))
-    operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-    keep_best_1 = operations.KeepBestN(1, False)
-    operations_graph.append_operation(keep_best_1)
-
-    for _ in range(1):
-        operations_graph.append_operation(operations.Generate(1, 20))
-        operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-        keep_best_2 = operations.KeepBestN(1, False)
-        keep_best_2.add_predecessor(keep_best_1)
-        operations_graph.append_operation(keep_best_2)
-        keep_best_1 = keep_best_2
-
-    operations_graph.append_operation(operations.KeepBestN(1, False))
-    operations_graph.append_operation(operations.GroundTruth(utils.test_sorting))
-
-    return operations_graph
+    # depth=3 (4->3->2->1), B=20, K=1
+    return _beam_search_graph(num_branches=20, beam_width=1, max_depth=3)
 
 
 def tot2() -> operations.GraphOfOperations:
@@ -584,72 +593,21 @@ def tot2() -> operations.GraphOfOperations:
     :return: Graph of Operations
     :rtype: GraphOfOperations
     """
-    operations_graph = operations.GraphOfOperations()
 
-    operations_graph.append_operation(operations.Generate(1, 10))
-    operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-    keep_best_1 = operations.KeepBestN(1, False)
-    operations_graph.append_operation(keep_best_1)
-
-    for _ in range(2):
-        operations_graph.append_operation(operations.Generate(1, 10))
-        operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-        keep_best_2 = operations.KeepBestN(1, False)
-        keep_best_2.add_predecessor(keep_best_1)
-        operations_graph.append_operation(keep_best_2)
-        keep_best_1 = keep_best_2
-
-    operations_graph.append_operation(operations.KeepBestN(1, False))
-    operations_graph.append_operation(operations.GroundTruth(utils.test_sorting))
-
-    return operations_graph
+    # depth=3 (4 -> 3 -> 2 -> 1), B=10, K=1
+    return _beam_search_graph(num_branches=10, beam_width=1, max_depth=3)
 
 
 def got() -> operations.GraphOfOperations:
     """
     Generates the Graph of Operations for the GoT method.
-
+    
     :return: Graph of Operations
     :rtype: GraphOfOperations
     """
-    operations_graph = operations.GraphOfOperations()
-
-    plans = operations.Generate(1, 1)
-    operations_graph.append_operation(plans)  # generate the sublists
-    for i in range(1, 3):
-        list_id = f"List {i}"
-        sub_list = operations.Selector(
-            lambda thoughts, list_id=list_id: [
-                thought for thought in thoughts if thought.state["part"] == list_id
-            ]
-        )
-        sub_list.add_predecessor(plans)
-        operations_graph.add_operation(sub_list)
-        sort_sub_list = operations.Generate(1, 5)
-        sort_sub_list.add_predecessor(sub_list)
-        operations_graph.add_operation(sort_sub_list)
-        score_sub_list = operations.Score(1, False, utils.num_errors)
-        score_sub_list.add_predecessor(sort_sub_list)
-        operations_graph.add_operation(score_sub_list)
-        keep_best_sub_list = operations.KeepBestN(1, False)
-        keep_best_sub_list.add_predecessor(score_sub_list)
-        operations_graph.add_operation(keep_best_sub_list)
-
-    final_aggregate = operations.Aggregate(10)
-    operations_graph.append_operation(final_aggregate)
-    operations_graph.append_operation(operations.Score(1, False, utils.num_errors))
-    keep_best_aggregate_final = operations.KeepBestN(1, False)
-    operations_graph.append_operation(keep_best_aggregate_final)
-
-    operations_graph.append_operation(operations.Generate(1, 10))
-    score_aggr_3 = operations.Score(1, False, utils.num_errors)
-    score_aggr_3.add_predecessor(keep_best_aggregate_final)
-    operations_graph.append_operation(score_aggr_3)
-    operations_graph.append_operation(operations.KeepBestN(1, False))
-
-    operations_graph.append_operation(operations.GroundTruth(utils.test_sorting))
-
-    return operations_graph
+    # GoT baseline here uses the same ToT-style search loop (graph-merge comes later at executor level)
+    # depth=3 (4 -> 3 -> 2 -> 1), B=30, K=3
+    return _beam_search_graph(num_branches=30, beam_width=3, max_depth=3)
 
 
 def run(
@@ -713,8 +671,45 @@ def run(
         level=logging.DEBUG,
     )
 
+    def _parse_numbers_for_items(original: str) -> List[float]:
+        if original is None:
+            return []
+        s = str(original).strip()
+        # Try JSON list first
+        try:
+            if s.startswith("[") and s.endswith("]"):
+                arr = json.loads(s)
+                return [float(x) for x in arr]
+        except Exception:
+            pass
+        # Fallback: whitespace/comma separated
+        s = s.replace(",", " ")
+        s = s.replace("[", " ").replace("]", " ")
+        parts = [p for p in s.split() if p.strip() != ""]
+        out = []
+        for p in parts:
+            try:
+                out.append(float(p))
+            except Exception:
+                pass
+        return out
+
+    def _init_items_state(original: str) -> Dict:
+        nums = _parse_numbers_for_items(original)
+        items = []
+        for i, v in enumerate(nums):
+            fv = float(v)
+            expr = str(int(fv)) if fv.is_integer() else str(fv)
+            items.append({"id": i, "value": fv, "expr": expr})
+        return {
+            "items": items,
+            "items_json": json.dumps(items),
+            "next_id": len(items),
+            "depth": 0,
+        }
+
     for method in methods:
-        os.makedirs(os.path.join(results_folder, method.__name__))
+        os.makedirs(os.path.join(results_folder, method.__name__)) 
 
     for data in selected_data:
         logging.info(f"Running data {data[0]}: {data[1]}")
@@ -750,6 +745,7 @@ def run(
                     "current": "",
                     "phase": 0,
                     "method": method.__name__,
+                    **_init_items_state(data[1]),
                 },
             )
             try:
