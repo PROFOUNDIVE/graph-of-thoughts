@@ -50,6 +50,8 @@ class ChatGPT(AbstractLanguageModel):
         self.max_tokens: int = self.config["max_tokens"]
         # The stop sequence is a sequence of tokens that the model will stop generating at (it will not generate the stop sequence).
         self.stop: Union[str, List[str]] = self.config["stop"]
+        # Optional: OpenAI-compatible server base_url (e.g., vLLM)
+        self.base_url: str = self.config.get("base_url", None)
         # The account organization is the organization that is used for chatgpt.
         self.organization: str = self.config["organization"]
         if self.organization == "":
@@ -58,7 +60,10 @@ class ChatGPT(AbstractLanguageModel):
         if self.api_key == "":
             raise ValueError("OPENAI_API_KEY is not set")
         # Initialize the OpenAI Client
-        self.client = OpenAI(api_key=self.api_key, organization=self.organization)
+        client_kwargs = {"api_key": self.api_key, "organization": self.organization}
+        if self.base_url:
+            client_kwargs["base_url"] = self.base_url.rstrip("/")
+        self.client = OpenAI(**client_kwargs)
 
     def query(
         self, query: str, num_responses: int = 1
