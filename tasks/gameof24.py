@@ -100,49 +100,73 @@ Input: {input}
 """
 
     gameof24_next_move_prompt_jsonl = """<Instruction>
- You are an expert player of the 24 Game.
- Goal: Combine numbers using +, -, *, / to reach 24.
- Task: Generate exactly {num_branches} diverse next moves from the given state.
- 
- State: A list of items, each with an 'id' and 'value'.
- Move: Select two different ids and an operator.
- 
- Rules for high-quality generation:
- 1. Diversity is key. Use a mix of all operators (+, -, *, /). Do not rely only on + and *.
- 2. Commutativity:
-    - + and * are commutative. picking [a, b] is the same as [b, a].
-    - - and / are NOT commutative. Consider BOTH [a, b] and [b, a] when valid.
-    - Example: 10 - 4 = 6, but 4 - 10 = -6. Both might be useful.
- 3. Strategic thinking:
-    - Prioritize operations that create factors of 24 (3, 4, 6, 8, 12).
-    - Prioritize operations that create numbers close to 24.
-    - Do not ignore fractions if they can lead to 24 (e.g., 6 / (1/4) = 24).
- 4. Valid JSONL: output ONLY valid JSON objects, one per line.
- 
- Schema:
- {{"pick": [id1, id2], "op": "operator"}}
- </Instruction>
- 
- <Example>
- Current Items:
- [{{"id": 0, "value": 10.0, "expr": "10"}}, {{"id": 1, "value": 4.0, "expr": "4"}}, {{"id": 2, "value": 2.0, "expr": "2"}}]
- 
- Output:
- {{"pick": [0, 1], "op": "-"}}
- {{"pick": [1, 0], "op": "-"}}
- {{"pick": [0, 2], "op": "/"}}
- {{"pick": [0, 1], "op": "+"}}
- {{"pick": [1, 2], "op": "*"}}
- {{"pick": [0, 2], "op": "-"}}
- ... (up to {num_branches} lines)
- </Example>
- 
- <CurrentItems>
- {items_json}
- </CurrentItems>
- 
- Output:
- """
+  You are an expert player of the 24 Game.
+  Goal: Combine numbers using +, -, *, / to reach 24.
+  Task: Generate exactly {num_branches} diverse next moves from the given state.
+  
+  State: A list of items, each with an 'id' and 'value'.
+  Move: Select two different ids and an operator.
+  
+  Rules for high-quality generation:
+  1. Diversity is key. Use a mix of all operators (+, -, *, /). Do not rely only on + and *.
+  2. Commutativity:
+     - + and * are commutative. picking [a, b] is the same as [b, a].
+     - - and / are NOT commutative. Consider BOTH [a, b] and [b, a] when valid.
+     - Example: 10 - 4 = 6, but 4 - 10 = -6. Both might be useful.
+  3. Strategic thinking:
+     - Prioritize operations that create factors of 24 (3, 4, 6, 8, 12).
+     - Prioritize operations that create numbers close to 24.
+     - Do not ignore fractions if they can lead to 24 (e.g., 6 / (1/4) = 24).
+  4. Valid JSONL: output ONLY valid JSON objects, one per line.
+  
+  Schema:
+  {{"pick": [id1, id2], "op": "operator"}}
+  </Instruction>
+  
+  <Example>
+  Current Items:
+  [{{"id": 0, "value": 10.0, "expr": "10"}}, {{"id": 1, "value": 4.0, "expr": "4"}}, {{"id": 2, "value": 2.0, "expr": "2"}}]
+  
+  Output:
+  {{"pick": [0, 1], "op": "-"}}
+  {{"pick": [1, 0], "op": "-"}}
+  {{"pick": [0, 2], "op": "/"}}
+  {{"pick": [0, 1], "op": "+"}}
+  {{"pick": [1, 2], "op": "*"}}
+  {{"pick": [0, 2], "op": "-"}}
+  ... (up to {num_branches} lines)
+  </Example>
+  
+  <CurrentItems>
+  {items_json}
+  </CurrentItems>
+  
+  Output:
+  """
+
+    gameof24_improve_prompt_jsonl = """<Instruction>
+  You are correcting a failed move in the 24 Game search.
+  The last move led to a dead end, so propose a DIFFERENT move.
+  
+  Previous items:
+  {prev_items_json}
+  
+  Last move (do NOT repeat this exact pick/op):
+  {last_move_json}
+  
+  Output exactly one candidate move as a single JSON object line:
+  {{"pick": [id1, id2], "op": "operator"}}
+  
+  Requirements:
+  - pick two different ids from the previous items.
+  - op must be one of: "+", "-", "*", "/".
+  - avoid repeating the same pick/op as the last move.
+  - for division, do NOT choose a divisor that is 0.
+  </Instruction>
+  
+  Output:
+  """
+
 
 
     def aggregation_prompt(self, state_dicts: List[Dict], **kwargs) -> str:
@@ -203,7 +227,14 @@ Input: {input}
         :return: The improve prompt.
         :rtype: str
         """
-        pass
+        state = kwargs.get("state") or kwargs
+        prev_items_json = state.get("prev_items_json", state.get("items_json", "[]"))
+        last_move_json = json.dumps(state.get("last_move", None))
+        
+        return self.gameof24_improve_prompt_jsonl.format(
+            prev_items_json=prev_items_json,
+            last_move_json=last_move_json,
+        )
 
     def validation_prompt(self, **kwargs) -> str:
         """
@@ -213,7 +244,7 @@ Input: {input}
         :return: The validation prompt.
         :rtype: str
         """
-        pass
+        return ""
 
     def score_prompt(self, state_dicts: List[Dict], **kwargs) -> str:
         """
@@ -226,7 +257,7 @@ Input: {input}
         :return: The score prompt.
         :rtype: str
         """
-        pass
+        return ""
 
 
 class Gameof24Parser(parser.Parser):
@@ -474,6 +505,9 @@ class Gameof24Parser(parser.Parser):
                 new_state["depth"] = int(base_state.get("depth", 0)) + 1
                 new_state["last_move"] = {"pick": [int(id1), int(id2)], "op": op}
                 new_state["current"] = new_expr  # keep a human-readable trace
+                new_state["prev_items"] = items
+                new_state["prev_items_json"] = base_state.get("items_json", "[]")
+                new_state["prev_next_id"] = base_state.get("next_id", len(items))
 
                 try:
                     new_state["items_json"] = json.dumps(next_items)
@@ -507,7 +541,27 @@ class Gameof24Parser(parser.Parser):
         :return: The new thought state after parsing the responses from the language model.
         :rtype: Dict
         """
-        pass
+        prev_items = state.get("prev_items") or state.get("items", [])
+        prev_items_json = state.get("prev_items_json") or state.get("items_json", "[]")
+        prev_next_id = state.get("prev_next_id", state.get("next_id", len(prev_items)))
+        base_depth = max(0, int(state.get("depth", 0)) - 1)
+
+        base_state = state.copy()
+        base_state["items"] = prev_items
+        base_state["items_json"] = prev_items_json
+        base_state["next_id"] = prev_next_id
+        base_state["depth"] = base_depth
+
+        improved_states = self.parse_generate_answer(base_state, texts)
+        last_move = state.get("last_move")
+        for improved_state in improved_states:
+            if improved_state.get("invalid_move"):
+                continue
+            if last_move is not None and improved_state.get("last_move") == last_move:
+                improved_state["invalid_move"] = True
+                continue
+            return improved_state
+        return improved_states[0] if improved_states else {"invalid_move": True}
 
     def parse_validation_answer(self, state: Dict, texts: List[str]) -> bool:
         """
@@ -520,7 +574,10 @@ class Gameof24Parser(parser.Parser):
         :return: Whether the thought state is valid or not.
         :rtype: bool
         """
-        pass
+        if len(texts) == 0:
+            return False
+        text = texts[0].strip().lower()
+        return any(token in text for token in ["true", "valid", "yes"])
 
     def parse_score_answer(self, states: List[Dict], texts: List[str]) -> List[float]:
         """
@@ -533,7 +590,28 @@ class Gameof24Parser(parser.Parser):
         :return: The scores for the thought states.
         :rtype: List[float]
         """
-        pass
+        return [0.0 for _ in states]
+
+
+def _is_solvable_state(state: Dict) -> bool:
+    """
+    Determine whether a state can still reach 24 using the oracle scorer.
+
+    :param state: Thought state containing current items.
+    :type state: Dict
+    :return: True if residual can reach 0, False otherwise.
+    :rtype: bool
+    """
+    items = state.get("items", [])
+    if not isinstance(items, list) or len(items) == 0:
+        return False
+    try:
+        vals = [float(item.get("value", 0.0)) for item in items]
+        residual = utils._best_residual(utils._round_key(vals))
+        return residual <= 1e-6
+    except Exception:
+        return False
+
 
 def _beam_search_graph(
     num_branches: int,
@@ -556,10 +634,47 @@ def _beam_search_graph(
             keep.add_predecessor(prev_keep)
         operations_graph.append_operation(keep)
         prev_keep = keep
-    
+
     operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
 
-    return operations_graph 
+    return operations_graph
+
+
+def _refined_beam_search_graph(
+    num_branches: int,
+    beam_width: int,
+    max_depth: int = 3,
+    num_tries: int = 2,
+) -> operations.GraphOfOperations:
+    """
+    Game24 refined search graph:
+    repeat max_depth times: Generate(B) -> ValidateAndImprove -> Score(game24_score) -> KeepBestN(K)
+    then GroundTruth(test_game24)
+    """
+    operations_graph = operations.GraphOfOperations()
+
+    prev_keep = None
+    for _ in range(max_depth):
+        operations_graph.append_operation(operations.Generate(1, num_branches))
+        operations_graph.append_operation(
+            operations.ValidateAndImprove(
+                num_samples=1,
+                improve=True,
+                num_tries=num_tries,
+                validate_function=_is_solvable_state,
+            )
+        )
+        operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+        keep = operations.KeepBestN(beam_width, False)
+        if prev_keep is not None:
+            keep.add_predecessor(prev_keep)
+        operations_graph.append_operation(keep)
+        prev_keep = keep
+
+    operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
+
+    return operations_graph
+
 
 def io() -> operations.GraphOfOperations:
     """
@@ -602,8 +717,8 @@ def tot() -> operations.GraphOfOperations:
     :rtype: GraphOfOperations
     """
 
-    # depth=3 (4->3->2->1), B=20, K=3
-    return _beam_search_graph(num_branches=20, beam_width=3, max_depth=3)
+    # depth=3 (4->3->2->1), B=30, K=3
+    return _beam_search_graph(num_branches=30, beam_width=3, max_depth=3)
 
 
 def tot2() -> operations.GraphOfOperations:
@@ -615,8 +730,8 @@ def tot2() -> operations.GraphOfOperations:
     :rtype: GraphOfOperations
     """
 
-    # depth=3 (4 -> 3 -> 2 -> 1), B=10, K=1
-    return _beam_search_graph(num_branches=10, beam_width=1, max_depth=3)
+    # depth=3 (4 -> 3 -> 2 -> 1), B=30, K=1
+    return _beam_search_graph(num_branches=30, beam_width=1, max_depth=3)
 
 
 def got() -> operations.GraphOfOperations:
@@ -626,10 +741,9 @@ def got() -> operations.GraphOfOperations:
     :return: Graph of Operations
     :rtype: GraphOfOperations
     """
-    # GoT baseline here uses the same ToT-style search loop (graph-merge comes later at executor level)
+    # GoT baseline here inserts a refine step using ValidateAndImprove.
     # depth=3 (4 -> 3 -> 2 -> 1), B=30, K=3
-    # 사실상 지금은 Tree of Thoughts에 Beam search를 구현한 거임.
-    return _beam_search_graph(num_branches=30, beam_width=3, max_depth=3)
+    return _refined_beam_search_graph(num_branches=30, beam_width=3, max_depth=3, num_tries=2)
 
 
 def run(
