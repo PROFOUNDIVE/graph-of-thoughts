@@ -11,7 +11,7 @@ import logging
 import datetime
 import json
 import csv
-from typing import Dict, List, Callable, Union
+from typing import Dict, List, Callable, Union, Optional
 from graph_of_thoughts import controller, language_models, operations, prompter, parser
 
 # This is a hack to also allow execution of this file from the examples directory
@@ -182,9 +182,7 @@ Input: {input}
         """
         raise NotImplementedError("Game of 24 does not use aggregation in this baseline.")
 
-    def generate_prompt(
-        self, num_branches: int, original: str, current: str, method: str, **kwargs
-    ) -> str:
+    def generate_prompt(self, num_branches: int, **kwargs) -> str:
         """
         Generate a generate prompt for the language model.
 
@@ -201,7 +199,6 @@ Input: {input}
         :rtype: str
         :raise AssertionError: If the requested number of branches is not one.
         """
-
         state = kwargs.get("state") or kwargs
         items_json = state["items_json"]
 
@@ -209,6 +206,7 @@ Input: {input}
             input = original
         else:
             input = current
+
         if method.startswith("io"):
             return self.gameof24_prompt.format(input=input)
         elif method.startswith("cot"):
@@ -218,6 +216,7 @@ Input: {input}
                 num_branches=num_branches,
                 items_json=items_json
             )
+        return ""
 
     def improve_prompt(self, **kwargs) -> str:
         """
@@ -299,7 +298,6 @@ class Gameof24Parser(parser.Parser):
                     if "Output" in answer:
                         answers = answers[answers.index(answer) :]
                         break
-
             answers_stripped = [
                 answer for answer in answers if "[" in answer and "]" in answer
             ]
@@ -743,7 +741,7 @@ def got() -> operations.GraphOfOperations:
     """
     # GoT baseline here inserts a refine step using ValidateAndImprove.
     # depth=3 (4 -> 3 -> 2 -> 1), B=30, K=3
-    return _refined_beam_search_graph(num_branches=30, beam_width=3, max_depth=3, num_tries=2)
+    return _refined_beam_search_graph(num_branches=30, beam_width=3, max_depth=3, num_tries=1)
 
 
 def run(
