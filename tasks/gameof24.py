@@ -100,41 +100,50 @@ Input: {input}
 """
 
     gameof24_next_move_prompt_jsonl = """<Instruction>
-You are proposing next moves for the 24 Game search.
+ You are an expert player of the 24 Game.
+ Goal: Combine numbers using +, -, *, / to reach 24.
+ Task: Generate exactly {num_branches} diverse next moves from the given state.
+ 
+ State: A list of items, each with an 'id' and 'value'.
+ Move: Select two different ids and an operator.
+ 
+ Rules for high-quality generation:
+ 1. Diversity is key. Use a mix of all operators (+, -, *, /). Do not rely only on + and *.
+ 2. Commutativity:
+    - + and * are commutative. picking [a, b] is the same as [b, a].
+    - - and / are NOT commutative. Consider BOTH [a, b] and [b, a] when valid.
+    - Example: 10 - 4 = 6, but 4 - 10 = -6. Both might be useful.
+ 3. Strategic thinking:
+    - Prioritize operations that create factors of 24 (3, 4, 6, 8, 12).
+    - Prioritize operations that create numbers close to 24.
+    - Do not ignore fractions if they can lead to 24 (e.g., 6 / (1/4) = 24).
+ 4. Valid JSONL: output ONLY valid JSON objects, one per line.
+ 
+ Schema:
+ {{"pick": [id1, id2], "op": "operator"}}
+ </Instruction>
+ 
+ <Example>
+ Current Items:
+ [{{"id": 0, "value": 10.0, "expr": "10"}}, {{"id": 1, "value": 4.0, "expr": "4"}}, {{"id": 2, "value": 2.0, "expr": "2"}}]
+ 
+ Output:
+ {{"pick": [0, 1], "op": "-"}}
+ {{"pick": [1, 0], "op": "-"}}
+ {{"pick": [0, 2], "op": "/"}}
+ {{"pick": [0, 1], "op": "+"}}
+ {{"pick": [1, 2], "op": "*"}}
+ {{"pick": [0, 2], "op": "-"}}
+ ... (up to {num_branches} lines)
+ </Example>
+ 
+ <CurrentItems>
+ {items_json}
+ </CurrentItems>
+ 
+ Output:
+ """
 
-State consists of items with unique ids. A move selects exactly two different item ids and an operator in {{+,-,*,/}}.
-You must output exactly {num_branches} candidate moves.
-Each candidate must be on its own line and must be a single JSON object with this schema:
-
-{{"pick":[id1,id2], "op":"+"}}
-
-Rules:
-- id1 and id2 must be two different ids present in the current items.
-- op must be one of: "+", "-", "*", "/".
-- **CRITICAL: Provide diverse candidates.** Do NOT repeat the same operation multiple times.
-- Mix different pairs of numbers and different operators (+, -, *, /).
-- For division, do NOT choose a divisor that is 0.
-</Instruction>
-
-<Example>
-Current Items:
-[{{"id": 0, "value": 4.0, "expr": "4"}}, {{"id": 1, "value": 9.0, "expr": "9"}}, {{"id": 2, "value": 10.0, "expr": "10"}}]
-
-Output:
-{{"pick": [0, 1], "op": "+"}}
-{{"pick": [0, 1], "op": "*"}}
-{{"pick": [1, 2], "op": "-"}}
-{{"pick": [1, 2], "op": "*"}}
-{{"pick": [0, 2], "op": "+"}}
-... total {num_branches} times
-</Example>
-
-<CurrentItems>
-{items_json}
-</CurrentItems>
-
-Output:
-"""
 
     def aggregation_prompt(self, state_dicts: List[Dict], **kwargs) -> str:
         """
