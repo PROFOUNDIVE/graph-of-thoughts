@@ -8,18 +8,75 @@
 
 import logging
 import math
-from typing import Dict, List
+from functools import lru_cache
+from typing import Dict, List, Tuple
 
+TARGET = 24.0
+EPS = 1e-6
+
+def _round_key(vals: List[float], ndigits: int = 6) -> Tuple[float, ...]:
+    # canonicalize for caching: sort + round
+    return tuple(sorted(round(v, ndigits) for v in vals))
+
+@lru_cache(maxsize=200_000)
+def _best_residual(key: Tuple[float, ...]) -> float:
+    """
+    Returns minimal achievable |value - 24| by fully reducing this multiset via +,-,*,/.
+    Smaller is better. 0 means solvable within rounding tolerance.
+    """
+    vals = list(key)
+    n = len(vals)
+
+    if n == 0:
+        return 1e9
+    if n == 1:
+        v = vals[0]
+        if not math.isfinite(v):
+            return 1e9
+        return abs(v - TARGET)
+
+    best = 1e9
+
+    # pick two indices i<j
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = vals[i], vals[j]
+            rest = [vals[k] for k in range(n) if k != i and k != j]
+
+            # generate results; include both orders for - and /
+            candidates = [
+                a + b,
+                a * b,
+                a - b,
+                b - a,
+            ]
+            if abs(b) > EPS:
+                candidates.append(a / b)
+            if abs(a) > EPS:
+                candidates.append(b / a)
+
+            for c in candidates:
+                if not math.isfinite(c):
+                    continue
+                # optional pruning for stability (prevents huge blowups)
+                if abs(c) > 1e6:
+                    continue
+
+                nxt = rest + [c]
+                r = _best_residual(_round_key(nxt))
+                if r < best:
+                    best = r
+                    if best <= 0.0 + 1e-9:
+                        return 0.0
+
+    return best
 
 def game24_score(state: Dict) -> float:
     logging.debug("utils > game24_score is called.")
     """
-    높을수록 안 좋게 설계됨!!
-    Heuristic:
-    - invalid_move => huge penalty
-    - prefer fewer remaining items (deeper states)
-    - prefer values closer to 24 (min distance among remaining items)
-    - penalize extreme magnitudes / non-finite values for stability
+    Smaller is better.
+    Primary: exact/near-exact residual distance to 24 from remaining items.
+    Secondary: very light depth + magnitude tie-breakers for stability.
     """
     try:
         if state.get("invalid_move"):
@@ -29,39 +86,23 @@ def game24_score(state: Dict) -> float:
         if not isinstance(items, list) or len(items) == 0:
             return 1e9
 
-        # proximity to 24 (best remaining item)
-        min_dist = 1e9
+        vals = []
         mag_pen = 0.0
         for it in items:
             v = float(it.get("value", 0.0))
             if not math.isfinite(v):
                 return 1e9
-            min_dist = min(min_dist, abs(v - 24.0))
-            # mild penalty for exploding magnitudes
-            mag_pen += max(0.0, abs(v) - 50.0)
+            vals.append(v)
+            # much gentler magnitude penalty
+            mag_pen += max(0.0, abs(v) - 100.0)
         
-        # one-step lookahead when only two items remain:
-        # prefer states that can reach 24 in a single operation.
-        if len(items) == 2:
-            a = float(items[0].get("value", 0.0))
-            b = float(items[1].get("value", 0.0))
-            candidates = [a + b, a - b, b - a, a * b]
-            if abs(b) >= 1e-12:
-                candidates.append(a / b)
-            if abs(a) >= 1e-12:
-                candidates.append(b / a)
-            next_min = 1e9
-            for v in candidates:
-                if not math.isfinite(v):
-                    continue
-                next_min = min(next_min, abs(v - 24.0))
-            # Override the "closest current item" heuristic with one-step feasibility.
-            min_dist = next_min
+        residual = _best_residual(_round_key(vals))
 
-        # prefer depeer (fewer items remaining)
-        depth_pen = 10.0 * (len(items) - 1)
+        # depth as *tie-breaker only* (very small weight)
+        # fewer items remaining is slightly preferred among equal residuals
+        depth_tiebreak = 0.05 * (len(items) - 1)
 
-        return float(min_dist) + float(depth_pen) + 0.01 * float(mag_pen)
+        return float(residual) + depth_tiebreak + 0.001 * float(mag_pen)
     except Exception:
         return 1e9
 

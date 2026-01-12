@@ -111,11 +111,23 @@ Each candidate must be on its own line and must be a single JSON object with thi
 Rules:
 - id1 and id2 must be two different ids present in the current items.
 - op must be one of: "+", "-", "*", "/".
-- Avoid duplicate moves: do not output the same (pick, op) twice.
-- For division, do NOT choose a divisor that is 0 (based on the current value of that item).
-- Prefer diverse candidates (different pairs/operators), not minor variations.
-- Do not include any other text, explanations, code fences, or commentary.
+- **CRITICAL: Provide diverse candidates.** Do NOT repeat the same operation multiple times.
+- Mix different pairs of numbers and different operators (+, -, *, /).
+- For division, do NOT choose a divisor that is 0.
 </Instruction>
+
+<Example>
+Current Items:
+[{{"id": 0, "value": 4.0, "expr": "4"}}, {{"id": 1, "value": 9.0, "expr": "9"}}, {{"id": 2, "value": 10.0, "expr": "10"}}]
+
+Output:
+{{"pick": [0, 1], "op": "+"}}
+{{"pick": [0, 1], "op": "*"}}
+{{"pick": [1, 2], "op": "-"}}
+{{"pick": [1, 2], "op": "*"}}
+{{"pick": [0, 2], "op": "+"}}
+... total {num_branches} times
+</Example>
 
 <CurrentItems>
 {items_json}
@@ -581,8 +593,8 @@ def tot() -> operations.GraphOfOperations:
     :rtype: GraphOfOperations
     """
 
-    # depth=3 (4->3->2->1), B=20, K=1
-    return _beam_search_graph(num_branches=20, beam_width=1, max_depth=3)
+    # depth=3 (4->3->2->1), B=20, K=3
+    return _beam_search_graph(num_branches=20, beam_width=3, max_depth=3)
 
 
 def tot2() -> operations.GraphOfOperations:
@@ -607,6 +619,7 @@ def got() -> operations.GraphOfOperations:
     """
     # GoT baseline here uses the same ToT-style search loop (graph-merge comes later at executor level)
     # depth=3 (4 -> 3 -> 2 -> 1), B=30, K=3
+    # 사실상 지금은 Tree of Thoughts에 Beam search를 구현한 거임.
     return _beam_search_graph(num_branches=30, beam_width=3, max_depth=3)
 
 
