@@ -6,12 +6,16 @@
 #
 # main author: Nils Blach
 
-import os
-import logging
+import ast
+import csv
 import datetime
 import json
-import csv
-from typing import Dict, List, Callable, Union, Optional
+import logging
+import os
+import re
+from collections import Counter
+from typing import Callable, Dict, List, Union
+
 from graph_of_thoughts import controller, language_models, operations, prompter, parser
 
 # This is a hack to also allow execution of this file from the examples directory
@@ -59,17 +63,6 @@ Output: <expression> = 24
 Do not include any additional text after the final output line.
 </Instruction>
 
-<Approach>
-1. Consider combining two numbers at a time using +, -, *, / to create intermediate results.
-2. Reuse intermediate results with the remaining numbers, ensuring each original number is used exactly once.
-3. Try common 24 patterns such as:
-   - (a - b) * (c - d)
-   - (a + b) * (c - d)
-   - (a * b) / (c - d)
-   - (a / b) + (c / d), then scale if needed
-4. If a path fails, backtrack and try a different pairing or operation.
-</Approach>
-
 <Examples>
 Input: 4 9 10 13
 Work:
@@ -98,6 +91,7 @@ Output: 6 / (1 - 3/4) = 24
 
 Input: {input}
 """
+
 
     gameof24_next_move_prompt_jsonl = """<Instruction>
   You are an expert player of the 24 Game.
@@ -180,7 +174,7 @@ Input: {input}
         :rtype: str
         :raise AssertionError: If not exactly two thought states are provided.
         """
-        raise NotImplementedError("Game of 24 does not use aggregation in this baseline.")
+        return ""
 
     def generate_prompt(self, num_branches: int, **kwargs) -> str:
         """
@@ -188,30 +182,23 @@ Input: {input}
 
         :param num_branches: The number of responses the prompt should ask the LM to generate.
         :type num_branches: int
-        :param original: Input list of numbers.
-        :type original: str
-        :param current: Intermediate solution.
-        :type current: str
-        :param method: Method for which the generate prompt is generated.
-        :type method: str
         :param kwargs: Additional keyword arguments.
         :return: The generate prompt.
         :rtype: str
-        :raise AssertionError: If the requested number of branches is not one.
         """
         state = kwargs.get("state") or kwargs
-        items_json = state["items_json"]
+        original = state.get("original", "")
+        current = state.get("current", "")
+        method = state.get("method", "")
+        items_json = state.get("items_json", "[]")
 
-        if current is None or current == "":
-            input = original
-        else:
-            input = current
+        input_value = original if current in [None, ""] else current
 
         if method.startswith("io"):
-            return self.gameof24_prompt.format(input=input)
-        elif method.startswith("cot"):
-            return self.gameof24_prompt_cot.format(input=input)
-        elif method.startswith("tot") or method.startswith("got"):
+            return self.gameof24_prompt.format(input=input_value)
+        if method.startswith("cot"):
+            return self.gameof24_prompt_cot.format(input=input_value)
+        if method.startswith("tot") or method.startswith("got"):
             return self.gameof24_next_move_prompt_jsonl.format(
                 num_branches=num_branches,
                 items_json=items_json
@@ -259,6 +246,317 @@ Input: {input}
         return ""
 
 
+class Gameof24ExpressionParser(parser.Parser):
+    """
+    Gameof24ExpressionParser provides parsing for IO/CoT responses that return
+    a full expression solving the problem.
+    """
+
+    def __init__(self) -> None:
+        """
+        Inits the response cache.
+        """
+        self.cache = {}
+
+    def parse_aggregation_answer(
+        self, states: List[Dict], texts: List[str]
+    ) -> Union[Dict, List[Dict]]:
+        """
+        Parse the response from the language model for an aggregation prompt.
+
+        :param states: The thought states used to generate the prompt.
+        :type states: List[Dict]
+        :param texts: The responses to the prompt from the language model.
+        :type texts: List[str]
+        :return: The new thought states after parsing the responses from the language model.
+        :rtype: Union[Dict, List[Dict]]
+        :raise AssertionError: If not exactly two thought states are provided.
+        """
+        return states[0] if states else {}
+
+    def parse_generate_answer(self, state: Dict, texts: List[str]) -> List[Dict]:
+        """
+        Parse the response from the language model for a generate prompt.
+
+        Expects a full expression output such as:
+            Output: (10 - 4) * (13 - 9) = 24
+
+        :param state: The thought state used to generate the prompt.
+        :type state: Dict
+        :param texts: The responses to the prompt from the language model.
+        :type texts: List[str]
+        :return: The new thought states after parsing the responses from the language model.
+        :rtype: List[Dict]
+        """
+        base_state = state.copy()
+        original_numbers = self._parse_numbers_from_original(base_state.get("original", ""))
+        original_counter = Counter(self._normalize_number(num) for num in original_numbers)
+        new_states = []
+
+        for text in texts:
+            expression = self._extract_expression(text)
+            if expression is None:
+                new_states.append(self._invalid_state(base_state, text))
+                continue
+
+            if not self._numbers_match(expression, original_counter):
+                new_states.append(self._invalid_state(base_state, text))
+                continue
+
+            value = self._safe_eval(expression)
+            if value is None:
+                new_states.append(self._invalid_state(base_state, text))
+                continue
+
+            new_state = base_state.copy()
+            new_state.pop("invalid_move", None)
+            new_state["current"] = expression
+            new_state["items"] = [
+                {"id": 0, "value": float(value), "expr": expression}
+            ]
+            try:
+                new_state["items_json"] = json.dumps(new_state["items"])
+            except Exception:
+                new_state["items_json"] = str(new_state["items"])
+            new_state["next_id"] = 1
+            new_state["depth"] = int(base_state.get("depth", 0)) + 1
+            new_states.append(new_state)
+
+        return new_states
+
+    def parse_improve_answer(self, state: Dict, texts: List[str]) -> Dict:
+        """
+        Parse the response from the language model for an improve prompt.
+
+        :param state: The thought state used to generate the prompt.
+        :type state: Dict
+        :param texts: The responses to the prompt from the language model.
+        :type texts: List[str]
+        :return: The new thought state after parsing the responses from the language model.
+        :rtype: Dict
+        """
+        improved_states = self.parse_generate_answer(state, texts)
+        return improved_states[0] if improved_states else {"invalid_move": True}
+
+    def parse_validation_answer(self, state: Dict, texts: List[str]) -> bool:
+        """
+        Parse the response from the language model for a validation prompt.
+
+        :param state: The thought state used to generate the prompt.
+        :type state: Dict
+        :param texts: The responses to the prompt from the language model.
+        :type texts: List[str]
+        :return: Whether the thought state is valid or not.
+        :rtype: bool
+        """
+        if len(texts) == 0:
+            return False
+        text = texts[0].strip().lower()
+        return any(token in text for token in ["true", "valid", "yes"])
+
+    def parse_score_answer(self, states: List[Dict], texts: List[str]) -> List[float]:
+        """
+        Parse the response from the language model for a score prompt.
+
+        :param states: The thought states used to generate the prompt.
+        :type states: List[Dict]
+        :param texts: The responses to the prompt from the language model.
+        :type texts: List[str]
+        :return: The scores for the thought states.
+        :rtype: List[float]
+        """
+        return [0.0 for _ in states]
+
+    def _parse_numbers_from_original(self, original: str) -> List[float]:
+        """
+        Parse the original input string into a list of numbers.
+
+        :param original: The original input string.
+        :type original: str
+        :return: Parsed list of numbers.
+        :rtype: List[float]
+        """
+        if original is None:
+            return []
+        s = str(original).strip()
+        try:
+            if s.startswith("[") and s.endswith("]"):
+                arr = json.loads(s)
+                return [float(x) for x in arr]
+        except Exception:
+            pass
+        s = s.replace(",", " ")
+        s = s.replace("[", " ").replace("]", " ")
+        parts = [p for p in s.split() if p.strip() != ""]
+        out = []
+        for p in parts:
+            try:
+                out.append(float(p))
+            except Exception:
+                pass
+        return out
+
+    def _extract_expression(self, text: str) -> Union[str, None]:
+        """
+        Extract a candidate expression from the model output.
+
+        :param text: Raw model response text.
+        :type text: str
+        :return: Extracted expression or None.
+        :rtype: Union[str, None]
+        """
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for idx in range(len(lines) - 1, -1, -1):
+            line = lines[idx]
+            lowered = line.lower()
+            if lowered.startswith("output"):
+                if ":" in line:
+                    expr_line = line.split(":", 1)[1].strip()
+                else:
+                    expr_line = line[len("output") :].strip()
+                if expr_line == "" and idx + 1 < len(lines):
+                    expr_line = lines[idx + 1].strip()
+                return self._strip_expression(expr_line)
+        for line in reversed(lines):
+            if "=" in line:
+                return self._strip_expression(line)
+        return None
+
+    def _strip_expression(self, line: str) -> str:
+        """
+        Strip the expression from a line containing an equals sign.
+
+        :param line: Line containing the expression.
+        :type line: str
+        :return: Expression portion of the line.
+        :rtype: str
+        """
+        expr_line = line.strip().rstrip(".")
+        if "=" in expr_line:
+            left, right = (part.strip() for part in expr_line.split("=", 1))
+            if self._looks_like_expression(right) and not self._looks_like_expression(left):
+                expr_line = right
+            else:
+                expr_line = left
+        return expr_line
+
+    def _looks_like_expression(self, text: str) -> bool:
+        """
+        Determine whether a string looks like a math expression.
+
+        :param text: Candidate text.
+        :type text: str
+        :return: True if it resembles an expression, False otherwise.
+        :rtype: bool
+        """
+        if re.search(r"[+\-*/()]", text):
+            return True
+        return False
+
+    def _extract_numbers(self, expression: str) -> List[float]:
+        """
+        Extract numeric literals from an expression string.
+
+        :param expression: Expression string.
+        :type expression: str
+        :return: Numbers found in the expression.
+        :rtype: List[float]
+        """
+        tokens = re.findall(r"\d+(?:\.\d+)?", expression)
+        return [float(token) for token in tokens]
+
+    def _normalize_number(self, value: float) -> str:
+        """
+        Normalize a numeric value for comparison.
+
+        :param value: Numeric value.
+        :type value: float
+        :return: Normalized string representation.
+        :rtype: str
+        """
+        if float(value).is_integer():
+            return str(int(value))
+        return str(value)
+
+    def _numbers_match(self, expression: str, original_counter: Counter) -> bool:
+        """
+        Check whether the expression uses exactly the original numbers.
+
+        :param expression: Expression string.
+        :type expression: str
+        :param original_counter: Counter of original numbers.
+        :type original_counter: Counter
+        :return: True if numbers match, False otherwise.
+        :rtype: bool
+        """
+        expr_numbers = self._extract_numbers(expression)
+        expr_counter = Counter(self._normalize_number(num) for num in expr_numbers)
+        return expr_counter == original_counter
+
+    def _safe_eval(self, expression: str) -> Union[float, None]:
+        """
+        Safely evaluate a math expression containing +, -, *, / only.
+
+        :param expression: Expression string.
+        :type expression: str
+        :return: Evaluated numeric result or None on failure.
+        :rtype: Union[float, None]
+        """
+        try:
+            node = ast.parse(expression, mode="eval")
+        except Exception:
+            return None
+
+        def _eval_node(ast_node: ast.AST) -> float:
+            if isinstance(ast_node, ast.Expression):
+                return _eval_node(ast_node.body)
+            if isinstance(ast_node, ast.Constant) and isinstance(ast_node.value, (int, float)):
+                return float(ast_node.value)
+            if isinstance(ast_node, ast.UnaryOp) and isinstance(ast_node.op, (ast.UAdd, ast.USub)):
+                value = _eval_node(ast_node.operand)
+                return value if isinstance(ast_node.op, ast.UAdd) else -value
+            if isinstance(ast_node, ast.BinOp) and isinstance(
+                ast_node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)
+            ):
+                left = _eval_node(ast_node.left)
+                right = _eval_node(ast_node.right)
+                if isinstance(ast_node.op, ast.Add):
+                    return left + right
+                if isinstance(ast_node.op, ast.Sub):
+                    return left - right
+                if isinstance(ast_node.op, ast.Mult):
+                    return left * right
+                if isinstance(ast_node.op, ast.Div):
+                    return left / right
+            raise ValueError("Unsupported expression")
+
+        try:
+            return float(_eval_node(node))
+        except Exception:
+            return None
+
+    def _invalid_state(self, base_state: Dict, text: str) -> Dict:
+        """
+        Build a fallback state for invalid parse results.
+
+        :param base_state: Base thought state.
+        :type base_state: Dict
+        :param text: Raw model response text.
+        :type text: str
+        :return: Penalized state marked as invalid.
+        :rtype: Dict
+        """
+        logging.warning(
+            "Could not parse any valid expression from generate answer: "
+            f"{text}. Returning a penalized state."
+        )
+        fallback_state = base_state.copy()
+        fallback_state["depth"] = int(base_state.get("depth", 0)) + 1
+        fallback_state["invalid_move"] = True
+        fallback_state["current"] = "INVALID_MOVE"
+        return fallback_state
+
+
 class Gameof24Parser(parser.Parser):
     """
     Gameof24Parser provides the parsing of language model reponses specific to
@@ -287,50 +585,7 @@ class Gameof24Parser(parser.Parser):
         :rtype: Union[Dict, List[Dict]]
         :raise AssertionError: If not exactly two thought states are provided.
         """
-
-        assert len(states) == 2, "Expected two states for aggregation answer."
-        new_states = []
-        for text in texts:
-            answers = text.strip().split("\n")
-            if any(["Output" in answer for answer in answers]):
-                # cut elements until last output is found
-                for answer in reversed(answers):
-                    if "Output" in answer:
-                        answers = answers[answers.index(answer) :]
-                        break
-            answers_stripped = [
-                answer for answer in answers if "[" in answer and "]" in answer
-            ]
-            if len(answers_stripped) == 0:
-                for answer in answers:
-                    answer = "[" + answer + "]"
-                    try:
-                        answer_converted = utils.string_to_list(answer)
-                        if len(answer_converted) > 0:
-                            answers_stripped.append(answer)
-                    except:
-                        pass
-            if len(answers_stripped) == 0:
-                logging.warning(
-                    f"Could not parse aggregation answer: {text}. Returning empty list."
-                )
-                answer = "[]"
-            else:
-                answer = [
-                    answer[answer.index("[") : answer.index("]") + 1]
-                    for answer in answers_stripped
-                ][0]
-            states = sorted(states, key=lambda x: x["part"])
-            merged_unsorted_sublists = (
-                states[0]["unsorted_sublist"][:-1]
-                + ", "
-                + states[1]["unsorted_sublist"][1:]
-            )
-            new_state = states[0].copy()
-            new_state["current"] = answer
-            new_state["unsorted_sublist"] = merged_unsorted_sublists
-            new_states.append(new_state)
-        return new_states
+        return states[0] if states else {}
 
     def parse_generate_answer(self, state: Dict, texts: List[str]) -> List[Dict]:
         """
@@ -591,7 +846,22 @@ class Gameof24Parser(parser.Parser):
         return [0.0 for _ in states]
 
 
+def get_gameof24_parser(method: str) -> parser.Parser:
+    """
+    Select the parser implementation for a given Game24 method.
+
+    :param method: Method name (e.g., io, cot, tot, got).
+    :type method: str
+    :return: Parser suited to the method.
+    :rtype: parser.Parser
+    """
+    if method.startswith("io") or method.startswith("cot"):
+        return Gameof24ExpressionParser()
+    return Gameof24Parser()
+
+
 def _is_solvable_state(state: Dict) -> bool:
+
     """
     Determine whether a state can still reach 24 using the oracle scorer.
 
@@ -674,6 +944,47 @@ def _refined_beam_search_graph(
     return operations_graph
 
 
+def _selective_refined_beam_search_graph(
+    num_branches: int,
+    refine_width: int,
+    beam_width: int,
+    max_depth: int = 3,
+    num_tries: int = 1,
+) -> operations.GraphOfOperations:
+    """
+    Game24 selective refined search graph:
+    repeat max_depth times: Generate(B) -> Score -> KeepBestN(refine_width)
+    -> ValidateAndImprove -> Score -> KeepBestN(beam_width) then GroundTruth.
+    """
+    operations_graph = operations.GraphOfOperations()
+
+    prev_keep = None
+    for _ in range(max_depth):
+        operations_graph.append_operation(operations.Generate(1, num_branches))
+        operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+        keep_for_refine = operations.KeepBestN(refine_width, False)
+        if prev_keep is not None:
+            keep_for_refine.add_predecessor(prev_keep)
+        operations_graph.append_operation(keep_for_refine)
+
+        operations_graph.append_operation(
+            operations.ValidateAndImprove(
+                num_samples=1,
+                improve=True,
+                num_tries=num_tries,
+                validate_function=_is_solvable_state,
+            )
+        )
+        operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+        keep_final = operations.KeepBestN(beam_width, False)
+        operations_graph.append_operation(keep_final)
+        prev_keep = keep_final
+
+    operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
+
+    return operations_graph
+
+
 def io() -> operations.GraphOfOperations:
     """
     Generates the Graph of Operations for the IO method.
@@ -739,9 +1050,15 @@ def got() -> operations.GraphOfOperations:
     :return: Graph of Operations
     :rtype: GraphOfOperations
     """
-    # GoT baseline here inserts a refine step using ValidateAndImprove.
-    # depth=3 (4 -> 3 -> 2 -> 1), B=30, K=3
-    return _refined_beam_search_graph(num_branches=30, beam_width=3, max_depth=3, num_tries=1)
+    # GoT baseline uses selective refining before the final beam.
+    # depth=3 (4 -> 3 -> 2 -> 1), B=30, refine=10, K=3
+    return _selective_refined_beam_search_graph(
+        num_branches=30,
+        refine_width=10,
+        beam_width=3,
+        max_depth=3,
+        num_tries=1,
+    )
 
 
 def run(
@@ -873,7 +1190,7 @@ def run(
                 lm,
                 operations_graph,
                 Gameof24Prompter(),
-                Gameof24Parser(),
+                get_gameof24_parser(method.__name__),
                 {
                     "original": data[1],
                     "current": "",

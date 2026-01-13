@@ -1,6 +1,7 @@
 import argparse
 import concurrent.futures
 import json
+import logging
 import os
 
 from datetime import datetime
@@ -10,7 +11,7 @@ from tqdm import tqdm
 from graph_of_thoughts import controller, language_models
 from tasks.gameof24 import (
     Gameof24Prompter,
-    Gameof24Parser,
+    get_gameof24_parser,
     got,
     tot,
     tot2,
@@ -30,6 +31,21 @@ METHODS = {
     "tot2": tot2,
     "got": got,
 }
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _log_thoughts(ctrl: controller.Controller) -> None:
+    for operation in ctrl.graph.operations:
+        if not operation.get_thoughts():
+            continue
+        LOGGER.debug("Operation %s thoughts:", operation.operation_type)
+        for idx, thought in enumerate(operation.get_thoughts()):
+            LOGGER.debug(
+                "Thought %s state: %s",
+                idx,
+                json.dumps(thought.state, ensure_ascii=False, sort_keys=True),
+            )
 
 
 def _solve_problem(
@@ -75,10 +91,12 @@ def _solve_problem(
         local_lm,
         gop,
         Gameof24Prompter(),
-        Gameof24Parser(),
+        get_gameof24_parser(method),
         init_state,
     )
     ctrl.run()
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        _log_thoughts(ctrl)
 
     filename = os.path.join(
         log_dir, f"output_{task}_{method}_{model_name}_{timestamp}_{idx}.json"
@@ -155,6 +173,17 @@ if __name__ == "__main__":
         help="Graph method to run.",
     )
     parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level for debug tracing.",
+    )
+    parser.add_argument(
+        "--log-file",
+        default="",
+        help="Optional log file path for debug output.",
+    )
+    parser.add_argument(
         "--model-name",
         default="gpt-4o-mini",
         help="Model name from config.",
@@ -181,6 +210,15 @@ if __name__ == "__main__":
         help="Number of worker threads when multithreaded.",
     )
     args = parser.parse_args()
+
+    log_kwargs = {
+        "level": getattr(logging, args.log_level),
+        "format": "%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    }
+    if args.log_file:
+        log_kwargs["filename"] = args.log_file
+        log_kwargs["filemode"] = "w"
+    logging.basicConfig(**log_kwargs)
 
     run_benchmark(
         task=args.task,
