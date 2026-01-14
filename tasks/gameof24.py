@@ -14,7 +14,7 @@ import logging
 import os
 import re
 from collections import Counter
-from typing import Callable, Dict, List, Union
+from typing import Callable, Dict, List, Tuple, Union
 
 from graph_of_thoughts import controller, language_models, operations, prompter, parser
 
@@ -861,7 +861,6 @@ def get_gameof24_parser(method: str) -> parser.Parser:
 
 
 def _is_solvable_state(state: Dict) -> bool:
-
     """
     Determine whether a state can still reach 24 using the oracle scorer.
 
@@ -879,6 +878,82 @@ def _is_solvable_state(state: Dict) -> bool:
         return residual <= 1e-6
     except Exception:
         return False
+
+
+def _extract_expression_for_vote(state: Dict) -> str:
+    """
+    Extract the expression string used for self-consistency voting.
+
+    :param state: Thought state containing current expression or items.
+    :type state: Dict
+    :return: Expression string used for voting, or empty string.
+    :rtype: str
+    """
+    # For IO/CoT-style methods, the parser already extracts the expression from the final "Output:" line.
+    expression = state.get("current")
+    if expression:
+        return str(expression)
+    items = state.get("items", [])
+    if isinstance(items, list) and len(items) == 1:
+        expr_value = items[0].get("expr", items[0].get("value", ""))
+        return str(expr_value)
+    return ""
+
+
+def _normalize_expression_for_vote(expression: str) -> str:
+    """
+    Normalize an expression string for majority vote comparison.
+
+    :param expression: Raw expression string.
+    :type expression: str
+    :return: Normalized expression key.
+    :rtype: str
+    """
+    return re.sub(r"\s+", "", str(expression).strip())
+
+
+def _self_consistency_majority_vote(
+    thoughts: List[operations.Thought],
+) -> List[operations.Thought]:
+    """
+    Select a single thought by majority vote over expressions.
+
+    :param thoughts: Candidate thoughts from the previous operation.
+    :type thoughts: List[operations.Thought]
+    :return: List containing the selected thought.
+    :rtype: List[operations.Thought]
+    """
+    if len(thoughts) == 0:
+        return []
+
+    candidates: List[Tuple[operations.Thought, str]] = []
+    for thought in thoughts:
+        state = thought.state
+        if state.get("invalid_move"):
+            continue
+        expression = _extract_expression_for_vote(state)
+        if expression == "":
+            continue
+        candidates.append((thought, _normalize_expression_for_vote(expression)))
+
+    if len(candidates) == 0:
+        return [thoughts[0]]
+
+    counts = Counter(key for _, key in candidates)
+    best_count = max(counts.values())
+    best_candidates = [
+        candidate for candidate in candidates if counts[candidate[1]] == best_count
+    ]
+
+    def _tie_break_key(candidate: Tuple[operations.Thought, str]) -> Tuple[float, int]:
+        thought, _ = candidate
+        state = thought.state
+        expression = _extract_expression_for_vote(state)
+        score = utils.game24_score(state)
+        return score, len(expression)
+
+    selected_thought = min(best_candidates, key=_tie_break_key)[0]
+    return [selected_thought]
 
 
 def _beam_search_graph(
@@ -1011,6 +1086,29 @@ def cot() -> operations.GraphOfOperations:
     operations_graph = operations.GraphOfOperations()
 
     operations_graph.append_operation(operations.Generate(1, 1))
+    operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
+    operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
+
+    return operations_graph
+
+
+def cot_sc() -> operations.GraphOfOperations:
+    """
+    Generates the Graph of Operations for CoT self-consistency.
+
+    Uses majority voting across K sampled CoT solutions, where K is configured
+    via the GAME24_SC_K environment variable.
+
+    :return: Graph of Operations
+    :rtype: GraphOfOperations
+    """
+    num_samples = max(1, int(os.getenv("GAME24_SC_K", "10")))
+    operations_graph = operations.GraphOfOperations()
+
+    operations_graph.append_operation(operations.Generate(1, num_samples))
+    operations_graph.append_operation(
+        operations.Selector(_self_consistency_majority_vote)
+    )
     operations_graph.append_operation(operations.Score(1, False, utils.game24_score))
     operations_graph.append_operation(operations.GroundTruth(utils.test_game24))
 
@@ -1226,7 +1324,7 @@ if __name__ == "__main__":
     """
     budget = 30
     samples = [item for item in range(0, 100)]
-    approaches = [io, cot, tot, tot2, got]
+    approaches = [io, cot, cot_sc, tot, tot2, got]
 
     spent = run(samples, approaches, budget, "chatgpt")
 

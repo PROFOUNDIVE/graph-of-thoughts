@@ -17,6 +17,7 @@ from tasks.gameof24 import (
     tot2,
     io,
     cot,
+    cot_sc,
 )
 from tasks import utils  # (선택) 디버깅/스코어 확인용
 
@@ -27,6 +28,7 @@ def _compact_json(obj) -> str:
 METHODS = {
     "io": io,
     "cot": cot,
+    "cot_sc": cot_sc,
     "tot": tot,
     "tot2": tot2,
     "got": got,
