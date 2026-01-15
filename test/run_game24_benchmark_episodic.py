@@ -87,6 +87,7 @@ def _solve_problem(
         model_name=model_name,
         cache=False,
     )
+    local_lm.reset_usage()
 
     gop = method_fn()
     ctrl = controller.Controller(

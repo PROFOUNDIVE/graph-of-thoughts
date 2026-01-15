@@ -65,6 +65,17 @@ class AbstractLanguageModel(ABC):
         """
         self.response_cache.clear()
 
+    def reset_usage(self) -> None:
+        """
+        Reset tracked token usage and cost counters.
+
+        :return: None.
+        :rtype: None
+        """
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.cost = 0.0
+
     @abstractmethod
     def query(self, query: str, num_responses: int = 1) -> Any:
         """
